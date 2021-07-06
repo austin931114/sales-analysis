@@ -1,0 +1,821 @@
+---
+title: "Understanding How Audit Factors Affecting Case Sales"
+author: Yong Nan Chang
+output: 
+  rmdformats::readthedown:
+    self_contained: true
+    lightbox: true
+    gallery: false
+    highlight: tango
+    code_folding: hide
+---
+
+<style type="text/css">
+h1.title {
+font-size: 40px;
+text-align: center;
+}
+h4.author {
+font-size: 40px;
+text-align: center;
+}
+</style>
+
+---
+```{r setup, include=FALSE}
+# load packages here
+library(corrplot)  # for correlation matrix
+library(tidyverse)
+library(ggfortify)  # plot glmnet objects using ggplot instead of base R
+library(car)  # for VIFs
+library(bestglm)  # for stepwise variable selection methods
+library(glmnet)  # for ridge, lasso, and elastic net
+library(readxl)
+library(rmdformats)
+set.seed(12345)  # make sure to set your seed when doing cross validation!
+```
+![](Frazil.png)
+---
+
+# Background and Introduction
+
+The data on the following sheet is some sample data that has been anonymized. 
+It is a combination of case sales, machines present, & other audit data that 
+we've collected on a store level. 
+
+1.) Our key metric that we look at is asset utilization. We want to know how 
+well each of our machines are performing from a case sales perspective. Poorly 
+performing machines are not profitable.
+
+2.) It is normal to see a fractional machine number. We give our accounts the 
+benefit of taking into account when a machine is placed. A whole number 
+indicates that the machine has been there for a full 12 months (i.e. a machine 
+value of 0.2 would indicate that the machine has only been at that location for 
+a few months).
+
+3.) Our business model is to sell cases of product to a distributor who in turn 
+sells it to a store. We maintain a relationship with each store because we place 
+a Frazil-owned machine at each location. You will see multiple stores roll up to 
+a single distributor.
+
+---
+
+# Methods and Results
+
+The following table displays the variable names in this data set, along with 
+their descriptions.
+
+Variable         | Description
+--------------   | -------------
+Cases            | Number of sale cases in a store (response variable)
+Location ID      | Unique Identifier of a store
+Location City    | as the name show
+Location States  | as the name show
+Location Zip     | Zip Code
+Machines         | number of machine at the store for more than 1 year
+Price_12oz       | Price for 12 oz product
+Price_20oz       | Price for 20 oz product
+Price_32oz       | Price for 32 oz product
+Broken           | If the machine is not working  how long has it been broken?
+Rate             | rate of the cleanness and experience in the store
+
+
+I start by applying basic summary and exploratory statistics to this data to 
+better understand the data and identify trends, and I choose the variables 
+that are most related to the purpose of the analysis, Cases, Machines, 
+Price_12oz, Price_20oz, Price_32oz, Broken, and Rate. And I will use multiple
+linear regression for the analysis.
+
+```{r, fig.align='center', warning = FALSE}
+# read excel file
+mock <- read.csv("Mock Data Analysis-1.csv", header = TRUE, sep = ",") %>% 
+  select("Cases", "Machines", 
+         "Q3...1..What.are.the.current.prices.for.a.12oz..20oz..and.32oz.cup.of.Frazil....Price...12.oz.",
+         "Q3...2..What.are.the.current.prices.for.a.12oz..20oz..and.32oz.cup.of.Frazil....Price...20.oz.",
+         "Q3...3..What.are.the.current.prices.for.a.12oz..20oz..and.32oz.cup.of.Frazil....Price...32.oz.",
+         "Q4..If.the.machine.is.not.working..how.long.has.it.been.broken.",
+         "Q5..How.would.you.rate.the.cleanliness.and.experience.in.the.store.") %>% 
+  rename(Price_12oz = "Q3...1..What.are.the.current.prices.for.a.12oz..20oz..and.32oz.cup.of.Frazil....Price...12.oz.",
+         Price_20oz = "Q3...2..What.are.the.current.prices.for.a.12oz..20oz..and.32oz.cup.of.Frazil....Price...20.oz.",
+         Price_32oz = "Q3...3..What.are.the.current.prices.for.a.12oz..20oz..and.32oz.cup.of.Frazil....Price...32.oz.",
+         Broken = "Q4..If.the.machine.is.not.working..how.long.has.it.been.broken.",
+         Rate = "Q5..How.would.you.rate.the.cleanliness.and.experience.in.the.store.")
+
+mock$Cases <- as.double(mock$Cases)
+mock$Price_12oz <- as.double(mock$Price_12oz)
+mock$Price_20oz <- as.double(mock$Price_20oz)
+mock$Price_32oz <- as.double(mock$Price_32oz)
+mock$Machines <- as.double(mock$Machines)
+mock$Machines <- round(mock$Machines)
+
+mock <- filter(mock, !is.na(Cases), Cases > 0,
+               !(is.na(Price_12oz) & is.na(Price_20oz) & is.na(Price_32oz)),
+               Machines <= 3)
+
+mock$Broken <- as.factor(mock$Broken)
+mock$Rate <- as.factor(mock$Rate) 
+mock$Machines <- as.factor(mock$Machines)
+
+### show the data set
+summary(mock)
+head(mock)
+```
+
+
+```{r, fig.align='center', }
+# create data set only with continuous variable
+mock_cont <- mock %>% select(Cases, Price_12oz : Price_32oz)
+
+### scatterplot matrix (only with continuous)
+pairs(mock_cont, pch=5)
+
+### correlation matrix (only used for continuous variables)
+cor(mock_cont, use = "na.or.complete")
+round(cor(mock_cont, use = "na.or.complete"),2)
+corrplot(cor(mock_cont, , use = "na.or.complete"), type = "upper")
+```
+
+The correlation matrix does not show that price of the drink has a strong 
+correlation with cases. Since the aim of the analysis is to see how well each of 
+our machines are performing from a case sales perspective.  I decide to remove
+price factors because they does they did not have linear relationship with cases.
+
+
+```{r, fig.align='center'}
+# read excel file
+mock <- read.csv("Mock Data Analysis-1.csv", header = TRUE, sep = ",") %>% 
+  select("Cases", "Machines", 
+         "Q4..If.the.machine.is.not.working..how.long.has.it.been.broken.",
+         "Q5..How.would.you.rate.the.cleanliness.and.experience.in.the.store.") %>% 
+  rename(Broken = "Q4..If.the.machine.is.not.working..how.long.has.it.been.broken.",
+         Rate = "Q5..How.would.you.rate.the.cleanliness.and.experience.in.the.store.")
+
+# turn continuous variable to factors
+mock$Cases <- as.double(mock$Cases)
+
+# turn machine to whole number that represent number of machine for more than
+# a year at the store
+mock$Machines <- as.double(mock$Machines)
+mock$Machines <- round(mock$Machines)
+
+# there are less than 10 rows have machine > 3, they are very small compare to
+# the entire data
+mock <- filter(mock, !is.na(Cases), Cases > 0, Machines <= 3)
+
+# turn categorical variables to factors
+mock$Broken <- as.factor(mock$Broken)
+mock$Rate <- as.factor(mock$Rate) 
+mock$Machines <- as.factor(mock$Machines)
+
+# change name of levels in Broken and Rate
+levels(mock$Broken) <- list(BK = "Less than 24 hours", BK = "More than 1 month",
+                            BK = "More than 1 week, less than 1 month",
+                            BK = "More than 24 hours, less than 1 week",
+                            NB = "Not Broken", NB = "Store clerk unsure", NB = "<NA>")
+
+levels(mock$Rate) <- list(L1 = "1 - Store is filthy, old appliances, etc. It is noticeably bad.", 
+                          L2 = "2 - Store is average in these aspects. There is nothing out of the ordinary." ,
+                          L3 = "3 - Store is clean, modern, etc. You are impressed with over all look and feel.")
+
+# show the data set
+summary(mock)
+head(mock)
+```
+
+```{r, fig.align='center'}
+### Box Plot (for categorical)
+# remove missing value
+mock <- mock %>% 
+  filter(!is.na(Rate), !is.na(Broken))
+
+# create a box plot function 
+BoxPlotMock <- function(variable, name) {
+  ggplot(data = mock, mapping = aes(x = variable, y = Cases)) +
+    geom_boxplot() +
+    theme_bw() +
+    xlab(name) +
+    theme(aspect.ratio = 1)
+}
+
+# output box plot
+BoxPlotMock(mock$Machines, "Machines")
+BoxPlotMock(mock$Broken, "Broken")
+BoxPlotMock(mock$Rate, "Rate")
+
+
+### Interaction plot between Machine, Broken and Rate
+ggplot(data = mock,
+       mapping = aes(x = Machines, y = Cases,
+                     color = Broken, shape = Rate)) +
+  geom_point(size = 2) +
+  theme_bw() +
+  theme(aspect.ratio = 1)
+```
+
+From our exploratory data analyses, I notice several interesting features. 
+The box plot shows Machines clearly has strong positive correlation with Cases, 
+and Rate might have some positive correlation, but Broken does not show a strong 
+correlation with Cases. Additionally, I will consider including interaction terms, particularly an 
+interaction between Rate and Machines.
+
+
+I now want to fit a multiple linear regression model to the data set with Cases 
+as the response and the remaining variables as predictors. Here is the general 
+linear model I want to fit:
+
+$\text{Cases_i} = \beta_0 + \beta_1\times\text{Machines}_i +$
+$\beta_2\times\text{Broken}_i + \beta_3\times\text{Rate}_i + \epsilon_i$
+where $\epsilon_i \sim N(0, \sigma^2)$
+
+---
+
+# Variable Selection
+
+I will start by doing variable selection to find the simplest model possible. 
+I also think multicollinearity will be an issue within the variables, so 
+variable selection will help reduce this problem.
+
+```{r, fig.align='center'}
+# create dummy variable
+mock$machine1 <- ifelse(mock$Machines == "1", 1, 0)
+mock$machine2 <- ifelse(mock$Machines == "2", 1, 0)
+mock$machine3 <- ifelse(mock$Machines == "3", 1, 0)
+mock$RateL2 <- ifelse(mock$Rate == "L2", 1, 0)
+mock$RateL3 <- ifelse(mock$Rate == "L3", 1, 0)
+mock$BrokenNB <- ifelse(mock$Broken == "NB", 1, 0)
+mock$BrokenBK <- ifelse(mock$Broken == "BK", 1, 0)
+```
+
+```{r, fig.align='center'}
+# change response variable to the last column
+# DON'T include baseline variables
+mock_select <- mock %>% select(machine1 : machine3, RateL2, RateL3, BrokenBK, Cases)
+```
+
+```{r, fig.align='center'}
+# best subsets
+head(mock_select)
+best_subset_aic <- bestglm(mock_select, IC = "BIC", method = "exhaustive")
+best_subset_aic$BestModels 
+best_model_subset <- best_subset_aic$BestModel
+summary(best_model_subset)
+```
+
+
+```{r, fig.align='center'}
+# # forward selection
+# best_subset_aic_forward <- bestglm(mock_select, IC = "BIC", method = "forward")
+# best_subset_aic_forward$BestModels 
+# best_model_subset_forward <- best_subset_aic_forward$BestModel
+# summary(best_model_subset_forward)
+```
+```{r, fig.align='center'}
+#  backward selection
+best_subset_cv <- bestglm(mock_select, IC = "BIC", method = "backward", t = 100)
+best_model_subset_cv <- best_subset_cv$BestModel
+summary(best_model_subset_cv)
+```
+
+```{r, fig.align='center'}
+# step wise/sequential
+best_subset_ss <- bestglm(mock_select, IC = "BIC", method = "seqrep", t = 100)
+best_model_subset_ss <- best_subset_ss$BestModel
+summary(best_model_subset_ss)
+```
+
+
+```{r, fig.align='center'}
+# LASSO
+set.seed(12345)  # make sure to set your seed when doing cross validation!
+mock_select_x <- as.matrix(mock_select[, 1:6])
+mock_select_y <- mock_select[, 7]
+# use cross validation to pick the "best" (based on MSE) lambda
+mock_select_ridge_LASSO <- cv.glmnet(x = mock_select_x,
+                          y = mock_select_y, 
+                          type.measure = "mse", 
+                          alpha = 1)  # 1 is code for "LASSO"
+
+# plot (log) lambda vs MSE
+# autoplot(mock_select_ridge_LASSO, label = FALSE) +
+#   theme_bw() +
+#   theme(aspect.ratio = 1)
+
+# lambda.min: value of lambda that gives minimum mean cross-validated error
+mock_select_ridge_LASSO$lambda.min
+# lambda.1se: value of lambda within 1 standard error of the minimum 
+# cross-validated error
+mock_select_ridge_LASSO$lambda.1se
+
+coef(mock_select_ridge_LASSO, s = "lambda.min")
+coef(mock_select_ridge_LASSO, s = "lambda.1se")
+```
+
+
+```{r, fig.align='center'}
+# Elastic Net
+set.seed(12345)  # make sure to set your seed when doing cross validation!
+# use cross validation to pick the "best" (based on MSE) lambda
+mock_select_ridge_net <- cv.glmnet(x = mock_select_x,
+                          y = mock_select_y, 
+                          type.measure = "mse", 
+                          alpha = 0.5)  
+
+# plot (log) lambda vs MSE
+# autoplot(mock_select_ridge_net, label = FALSE) +
+#   theme_bw() +
+#   theme(aspect.ratio = 1)
+
+# lambda.min: value of lambda that gives minimum mean cross-validated error
+mock_select_ridge_net$lambda.min
+# lambda.1se: value of lambda within 1 standard error of the minimum 
+# cross-validated error
+mock_select_ridge_net$lambda.1se
+
+coef(mock_select_ridge_net, s = "lambda.min")
+coef(mock_select_ridge_net, s = "lambda.1se")
+```  
+
+Variable            | Best Subset | Backward | Sequential Replacement | LASSO  | Elastic Net
+--------------------| ----------- | -------- | ---------------------- | ------ | -----------
+      machine1      |        X      |    X     |            X           |        |      X    
+      machine2      |        X      |    X     |            X           |   X    |      X
+      machine3      |        X      |    X     |            X           |   X    |      X
+      Rate2         |               |          |                        |        |
+      Rate3         |        X      |    X     |            X           |        |      X
+      BrokenBK      |        X      |    X     |            X           |   X    |      X
+
+Given the results from all of the variable selection procedures, shown in the 
+table above, I choose to keep machine1, machine1, machine1, Rate3, and BrokenBK
+in our final model since four out five methods suggest these varibales are 
+significant to the response variable.
+
+
+---
+
+
+# Initial Linear Model
+
+```{r, fig.align='center'}
+# base model: machine0, RateL1 +BrokenNB
+mock_lm <- lm(Cases ~ machine1 + machine2 + machine3 + 
+                RateL3 + BrokenBK, data = mock_select)
+summary(mock_lm)
+```
+
+```{r, fig.align='center'}
+# anova test: break and machine
+mock_lm_inter_BkMach <- lm(Cases ~ machine1 + machine2 + machine3 + 
+                RateL3 + BrokenBK + BrokenBK:machine1+ BrokenBK:machine2
+                + BrokenBK:machine3
+                , data = mock_select)
+
+anova(mock_lm, mock_lm_inter_BkMach)
+```
+interaction between broken and machine are not significant.
+
+
+```{r, fig.align='center'}
+# anova test: rate and machine
+mock_lm_inter_BkRate <- lm(Cases ~ machine1 + machine2 + machine3  + 
+                RateL3 + BrokenBK + BrokenBK:RateL3
+                , data = mock_select)
+
+anova(mock_lm, mock_lm_inter_BkRate)
+```
+
+interaction between broken and rate are not significant.
+
+
+
+Bases on the result, I create a linear model without interaction.
+
+```{r, fig.align='center'}
+# base model: machine0, RateL1 +BrokenNB
+mock_lm_inter <- lm(Cases ~ machine1 + machine2 + machine3 + 
+                RateL3 + BrokenBK,
+                data = mock_select)
+
+summary(mock_lm_inter)
+```
+
+
+---
+
+
+# Assumption Tests
+
+```{r, fig.align='center'}
+# Linearity
+# partial regression plots
+avPlots(mock_lm_inter) + theme(aspect.ratio = 1)
+
+# residual vs fitted
+autoplot(mock_lm_inter, which = 1, ncol = 1, nrow = 1) + theme_bw() + 
+  theme(aspect.ratio = 1)
+
+```
+
+The partial regression parts shows no weird trend on the blue line, and the 
+residual vs fitted plot also has a fairly stright blue line. The linearity 
+assumption probability mets.
+
+On the other hand, the residual vs fitted plot does not equally distributed 
+residuals. The homoscasticity assumption is not met.
+
+
+```{r, fig.align='center'}
+## Nomality
+# Boxplot
+mock_select$residuals <- mock_lm_inter$residuals
+ggplot(data = mock_select, mapping = aes(y = residuals)) + geom_boxplot() + 
+  theme_bw() + theme(aspect.ratio = 1)
+
+# Histogram
+(mock_select_hist <- ggplot(data = mock_select, mapping = aes(x = residuals)) + 
+  # only has x being residuals
+  # when using this code for future data sets, make sure to change the binwidth: 
+  geom_histogram(mapping = aes(y = ..density..), binwidth = 4) +
+  # stat_function() overlays the red normal curve on the histogram
+  stat_function(fun = dnorm, 
+                color = "red", 
+                size = 2,
+                args = list(mean = mean(mock_select$residuals), 
+                            sd = sd(mock_select$residuals)))  +
+  theme(aspect.ratio = 1))
+
+# QQ Plot
+autoplot(mock_lm_inter, which = 2, ncol = 1, nrow = 1) + theme_bw() + 
+  theme(aspect.ratio = 1)
+
+# Shapiro-Wilk Test
+shapiro.test(mock_lm_inter$residuals)
+```
+
+The Shapiro-Wilk test indicates the dat is not nomally distributed. However,
+box plot has data distributed fairly evenly. Histogram is approxmitely normal,
+and the QQ plot is also roughly follow the straight line. The nomality assumption
+is probability met.
+
+```{r, fig.align='center'}
+# Cook's Distance
+mock_select$cooksd <- cooks.distance(mock_lm_inter)
+
+# plot Cook's distance against the observation number
+ggplot(data = mock_select) + 
+  geom_point(mapping = aes(x = as.numeric(rownames(mock_select)), 
+                           y = cooksd)) +
+  theme_bw() +
+  ylab("Cook's Distance") +
+  xlab("Observation Number") +
+  geom_hline(mapping = aes(yintercept = 4 / length(cooksd)),
+             color = "red", linetype = "dashed") +
+  # scale_x_continuous(limits = c(0, 300)) +
+  scale_y_continuous(limits = c(0, 0.3)) +
+  theme(aspect.ratio = 1)
+
+# print a list of potential outliers according to Cook's distance
+mock_select %>% 
+  mutate(rowNum = row.names(mock_select)) %>%  # save original row numbers 
+  filter(cooksd > 4 / length(cooksd)) %>%  # select potential outliers
+  arrange(desc(cooksd))  # order from largest Cook's distance to smallest
+
+
+# calculate the DFFITS
+mock_select$dffits <- dffits(mock_lm_inter)
+# plot the DFFITS against the observation number
+ggplot(data = mock_select) + 
+  geom_point(mapping = aes(x = as.numeric(rownames(mock_select)), 
+                           y = abs(dffits))) +
+  theme_bw() +
+  ylab("Absolute Value of DFFITS for Y") +
+  xlab("Observation Number") +
+  # for n > 30
+  geom_hline(mapping = aes(yintercept = 2 * sqrt(length(mock_lm_inter$coefficients) /
+                                                   length(dffits))),
+             color = "red", linetype = "dashed") +
+  # for n <= 30 (code for future, small data sets)
+  # geom_hline(mapping = aes(yintercept = 1),
+  #            color = "red", linetype = "dashed") +
+  scale_y_continuous(limits = c(0, 0.8)) +
+  # scale_y_continuous(limits = c(0, 1.1)) +
+  theme(aspect.ratio = 1)
+# print a list of potential influential points according to DFFITS
+# for n > 30
+mock_select %>% 
+  mutate(rowNum = row.names(mock_select)) %>%  # save original row numbers 
+  # select potential influential pts
+  filter(abs(dffits) > 2 * sqrt(length(mock_lm_inter$coefficients) / 
+                                  length(dffits))) %>%
+  arrange(desc(abs(dffits)))  # order from largest DFFITS to smallest
+
+
+```
+
+Although DFFITS plot does not show dots that are too far away from the rest of
+the points. There are two dots that might be outliers in the Cook's distance 
+plot. The model describes all observations assumption might not be met.
+
+
+After fitting the linear regression model and checking the assumptions, I 
+notice several assumptions may not be met. Specifically, the residual vs fitted
+plot does not equally distributed residuals. The homoscasticity assumption is 
+not met. And describes all observations assumption might not be met.
+
+
+---
+
+
+# Trying Several Linear Models
+
+Since homoscedasticity was likely not met, I apply a Box-Cox transform to 
+help us determine which transformation to use when transforming Y.
+
+```{r, fig.align='center'}
+# close to 0. transform log
+bc <- boxCox(mock_lm_inter, family="yjPower", plotit = TRUE)
+bc$x[which.max(bc$y)]
+```
+
+The Box-Cox has a value of 0.1818182, which suggests to transform suggested log 
+transform on y and this helped with the homoscedasticity assumption.
+
+```{r}
+# create trans linear model
+mock_select$Log_Cases <- log(mock_select$Cases)
+mock_lm_inter_trans <- lm(Log_Cases ~ machine1 + machine2 + machine3 + 
+                RateL3 + BrokenBK
+                , data = mock_select)
+summary(mock_lm_inter_trans)
+
+# create predicting value for log y
+machine1_values <- mock_select$machine1
+machine2_values <- mock_select$machine2
+machine3_values <- mock_select$machine3
+RateL3_values <- mock_select$RateL3
+BrokenBK_values <- mock_select$BrokenBK
+
+log_Cases_preds <- predict(mock_lm_inter_trans, 
+                         newdata = data.frame(machine1 = machine1_values,
+                                              machine2 = machine2_values,
+                                              machine3 = machine3_values,
+                                              RateL3 = RateL3_values,
+                                              BrokenBK = BrokenBK_values))
+
+
+Cases_preds <- exp(log_Cases_preds)  ## use exp to "UNDO" the log transform
+
+# Store results in a data frame for plotting
+preds <- data.frame("machine1_values" = machine1_values,
+                    "machine2_values" = machine2_values, 
+                    "machine3_values" = machine3_values, 
+                    "RateL3" = RateL3_values,
+                    "BrokenBK" = BrokenBK_values,
+                    "log_Cases_preds" = log_Cases_preds)
+```
+
+
+```{r, fig.align='center'}
+## Linearity, Homoscasticity
+# partial regression plots
+avPlots(mock_lm_inter_trans) + theme(aspect.ratio = 1)
+
+# residual vs fitted
+autoplot(mock_lm_inter_trans, which = 1, ncol = 1, nrow = 1) + theme_bw() + 
+  theme(aspect.ratio = 1)
+```
+
+Both partial regrssion plot and residuals vs fitted plot show no weird curve
+on the blue line. The linearity assumption is probability met.
+
+The residual vs fitted plot has equally spread residuals aound a horizontal
+line with not distinct pattern, which indicates the homoscasticity assumption
+is met.
+
+```{r, fig.align='center'}
+# Boxplot
+mock_select$residuals <- mock_lm_inter_trans$residuals
+ggplot(data = mock_select, mapping = aes(y = residuals)) + geom_boxplot() + 
+  theme_bw() + theme(aspect.ratio = 1)
+
+# Histogram
+(mock_select_hist <- ggplot(data = mock_select, mapping = aes(x = residuals)) + 
+  # only has x being residuals
+  # when using this code for future data sets, make sure to change the binwidth: 
+  geom_histogram(mapping = aes(y = ..density..)) +
+  # stat_function() overlays the red normal curve on the histogram
+  stat_function(fun = dnorm, 
+                color = "red", 
+                size = 2,
+                args = list(mean = mean(mock_select$residuals), 
+                            sd = sd(mock_select$residuals)))  +
+  theme(aspect.ratio = 1))
+
+# QQ Plot
+autoplot(mock_lm_inter_trans, which = 2, ncol = 1, nrow = 1) + theme_bw() + 
+  theme(aspect.ratio = 1)
+
+# Shapiro-Wilk Test
+shapiro.test(mock_lm_inter_trans$residuals)
+```
+
+The Shapiro-Wilk test indicates the dat is not nomally distributed. However,
+box plot has data distributed fairly evenly. Histogram is approxmitely normal,
+and the QQ plot is also roughly follow the straight line. The nomality assumption
+is probability met.
+
+```{r, fig.align='center'}
+# Cook's Distance
+mock_select$cooksd <- cooks.distance(mock_lm_inter_trans)
+
+# plot Cook's distance against the observation number
+ggplot(data = mock_select) + 
+  geom_point(mapping = aes(x = as.numeric(rownames(mock_select)), 
+                           y = cooksd)) +
+  theme_bw() +
+  ylab("Cook's Distance") +
+  xlab("Observation Number") +
+  geom_hline(mapping = aes(yintercept = 4 / length(cooksd)),
+             color = "red", linetype = "dashed") +
+  # scale_x_continuous(limits = c(0, 300)) +
+  scale_y_continuous(limits = c(0, 0.08)) +
+  theme(aspect.ratio = 1)
+
+# print a list of potential outliers according to Cook's distance
+mock_select %>% 
+  mutate(rowNum = row.names(mock_select)) %>%  # save original row numbers 
+  filter(cooksd > 4 / length(cooksd)) %>%  # select potential outliers
+  arrange(desc(cooksd))  # order from largest Cook's distance to smallest
+
+
+# calculate the DFFITS
+mock_select$dffits <- dffits(mock_lm_inter_trans)
+# plot the DFFITS against the observation number
+ggplot(data = mock_select) + 
+  geom_point(mapping = aes(x = as.numeric(rownames(mock_select)), 
+                           y = abs(dffits))) +
+  theme_bw() +
+  ylab("Absolute Value of DFFITS for Y") +
+  xlab("Observation Number") +
+  # for n > 30
+  geom_hline(mapping = aes(yintercept = 2 * sqrt(length(mock_lm_inter_trans$coefficients) /
+                                                   length(dffits))),
+             color = "red", linetype = "dashed") +
+  # for n <= 30 (code for future, small data sets)
+  # geom_hline(mapping = aes(yintercept = 1),
+  #            color = "red", linetype = "dashed") +
+  scale_y_continuous(limits = c(0, 0.8)) +
+  # scale_y_continuous(limits = c(0, 1.1)) +
+  theme(aspect.ratio = 1)
+# print a list of potential influential points according to DFFITS
+# for n > 30
+mock_select %>% 
+  mutate(rowNum = row.names(mock_select)) %>%  # save original row numbers 
+  # select potential influential pts
+  filter(abs(dffits) > 2 * sqrt(length(mock_lm_inter_trans$coefficients) / 
+                                  length(dffits))) %>%
+  arrange(desc(abs(dffits)))  # order from largest DFFITS to smallest
+
+```
+
+There are no points that are extremely far away from the rest of the data in both 
+Cook's Distance and DFFITS plots. Therefore, the describes all observations 
+assumption is probability met.
+
+The independent assumption should meet because the data are collected from all
+stores, and additional predictor variables are not required for the purpose of
+the analysis. However, some of the more detail data about machines, like 
+machine temperature might be helpful for more precise prediction.
+
+
+
+Although the selection method and anova test do not suggest strong interaction
+between variables. I decided to try including an interaction plot between Broken 
+and Rate since the results from our EDA suggested there might be a significant 
+interaction between those two variables, which can be beneficial for future
+reference and indicator.
+
+```{r, fig.align='center'}
+interaction.plot(x.factor = mock$Broken, 
+                 trace.factor = mock$Rate, 
+                 response = mock$Cases,
+                 col = c("#1b9e77", "#d95f02"),
+                 lwd = 2,
+                 trace.label = "Rate",
+                 ylab = "Cases",
+                 xlab = "Broken")
+```
+
+The interaction plot shows Broken has strong interaction with Rate, specifically
+for Rate 1. This might be a great target for a more appropriate dataset to see
+how they affect the sales.
+
+
+---
+
+
+# Final Linear Model
+
+```{r, fig.align='center'}
+mock_lm_inter_trans <- lm(Log_Cases ~ machine1 + machine2 + machine3 + 
+                RateL3 + BrokenBK
+                , data = mock_select)
+summary(mock_lm_inter_trans)
+```
+
+Our final model seems to meet all of the assumptions of linear regression. 
+
+Our final fitted model is: 
+
+
+$\log(\widehat{\text{Cases}}_i)$ $= 1.28561 +$ $1.16493\times\text{machine1}_i$ + 
+$2.05135\times\text{machine2}_i$ + $2.39578\times\text{machine3}_i$ + 
+$0.23112\times\text{RateL3}_i -0.35038 \times\text{BrokenBK}_i$
+
+
+---
+
+
+# Model Assessment
+
+Now that I have a model that describes the data well with all assumptions met, 
+I would like to use the model to make inferences and predictions. I are 
+interested in creating confidence intervals for the selected variables, as well 
+as getting predictions for new cities. I are particularly interested in the
+correlation between predicted average cases and machine status.
+
+```{r, fig.align='center'}
+summary(mock_lm_inter_trans)
+confint(mock_lm_inter_trans, level = 0.95)
+```
+
+All F-test and p-value of each variable all suggests the predictors has
+significant correlation with the sale cases. Generally, when there are more
+machines at the store for more than one years, the average sales case will 
+increase, and a clean, modern store also increase the average case sales. On 
+the other hand, a broken machine will decrease the average sales. The baseline 
+of the model is zero machine at the store for more than one year and no broken 
+machine at the store.
+
+
+The confidence intervals for the variables are very informative. For example, 
+I are 95% confident that, on average, when there are three machines at the store 
+for more than one year with non-broken machine and the store is rated as filthy, 
+the cases sale will increase from 207% to 272% comparing to the store with zero
+machines at the store for more than one year. And when there is one machines at 
+the store for more than one year, on average,  the cases sale will increase from 
+94% to 138% comparing to the store with zero machines at the store for more than 
+one year, which suggests that increasing the number of machine at the store will 
+have a positive influence on cases sales. 
+On the other hand, holding all else constant, I are 95% confident that a broken 
+machine at the store will lower the sale from 20% to 50% on average, comparing 
+no broken machine at the store. This result indicates that maintain a functional 
+machine is crucial for a higher case sale.
+Despite not significant, I are 95% confident that a clean, modern store will
+have a case sale increase from 15% to 30% on average, holding all else constant. 
+A customer friendly store will have positive influence for the cases sale.
+
+
+
+I are also interested in how well the model fits the data. To do this, I look 
+at metrics such as the RMSE. These metrics are important to check and understand 
+because I can know how well the model is fitting.
+
+```{r, fig.align='center'}
+# MSE, RMSE
+anova <- aov(mock_lm_inter_trans)  # get ANOVA components
+mock_lm_inter_trans_anova <- summary(anova)[[1]]  # save data in a usable form
+mse = mock_lm_inter_trans_anova["Residuals", "Sum Sq"] / 
+  mock_lm_inter_trans_anova["Residuals", "Df"]
+(sqrt(mse))
+```
+
+The RMSE represents the average amount of spread in the residuals. The RMSE 
+indicates that the average error in the model is around 0.81 sales. Since the
+mean value is 2.987, the average error perform by the model might be the 
+potential concern when interpreting the data from the analysis.
+
+
+---
+
+
+# Summary and Conclusions
+
+Our business model will maintain a higher number of Frazil-owned machines. 
+Therefore, understanding the correlation between machine utilization and cases
+sale is critical to the success of out business, and we want to see what the
+correlation is to predict future sale and effectively allocating the machines.
+The linear model shows there are significant relationships between cases-machine
+, cases-brokenMachine, and cases-storeRate. Generally, more machines at the 
+store for more than one year will have a higher average cases sale. When a 
+machine is broken at the store will lower the average cases sale, and a clean
+, modern store will have a higher average cases. 
+In a word, while a store maintain the relationship with Frazil for more than
+one year or even have multiple machine, the average cases sale can increase
+from 100% to 270% respectably. Keeping stable relationship with the restaurants
+could promote the sales. In addition, for those store have clean environment and
+sustain the machine at the working condition, the average sale cases will be 
+higher. The company should develop stable partnership with the restaurant that
+have high hygiene standard and cautious about the machines.
+
+
+---
